@@ -1,7 +1,8 @@
 package main
 
 import (
-	"code.google.com/p/go.net/websocket"
+	"fmt"
+	"github.com/gorilla/websocket"
 	"net/http"
 )
 
@@ -11,45 +12,53 @@ type Msg struct {
 	msg    string
 }
 
+var upgrader = websocket.Upgrader{} // use default options
+var reg = make(chan *websocket.Conn)
+var unreg = make(chan *websocket.Conn)
+var msg = make(chan Msg)
+
 func run(reg chan *websocket.Conn, unreg chan *websocket.Conn, msg chan Msg) {
 	conns := make(map[*websocket.Conn]int)
 	for {
 		select {
 		case c := <-reg:
 			conns[c] = 1
+			fmt.Printf("%p", c)
 		case c := <-unreg:
 			delete(conns, c)
 		case msg := <-msg:
 			for c := range conns {
 				if c != msg.sender {
-					websocket.Message.Send(c, msg.msg)
+					c.WriteMessage(websocket.TextMessage, []byte(msg.msg))
 				}
 			}
 		}
 	}
 }
 
-func newChatServer(reg chan *websocket.Conn, unreg chan *websocket.Conn, msg chan Msg) websocket.Handler {
-	return func(ws *websocket.Conn) {
-		reg <- ws
-		for {
-			var message string
-			err := websocket.Message.Receive(ws, &message)
-			if err != nil {
-				unreg <- ws
-				break
-			}
-			msg <- Msg{ws, message}
+func ChatServer(w http.ResponseWriter, r *http.Request) {
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		fmt.Printf("upgrade:", err)
+		return
+	}
+	defer c.Close()
+	reg <- c
+	for {
+		_, message, err := c.ReadMessage()
+		if err != nil {
+			fmt.Println("read:", err)
+			unreg <- c
+			break
 		}
+		msg <- Msg{c, string(message)}
+
 	}
 }
 
 func main() {
-	reg := make(chan *websocket.Conn)
-	unreg := make(chan *websocket.Conn)
-	msg := make(chan Msg)
 
-	http.Handle("/chat", websocket.Handler(newChatServer(reg, unreg, msg)))
+	http.HandleFunc("/chat", ChatServer)
 	http.Handle("/", http.FileServer(http.Dir("../static")))
 
 	go run(reg, unreg, msg)
